@@ -67,7 +67,7 @@ open class Task<Progress, Value, Error>: Cancellable, CustomStringConvertible
     public typealias RejectHandler = (Error) -> Void
     public typealias Configuration = TaskConfiguration
     
-    public typealias PromiseInitClosure = (_ fulfill: @escaping FulfillHandler, _ reject: @escaping RejectHandler) -> Void
+    public typealias PromiseInitClosure = (_ fulfill: @escaping FulfillHandler, _ reject: RejectHandler) -> Void
     public typealias InitClosure = (_ progress: @escaping ProgressHandler, _ fulfill: @escaping FulfillHandler, _ reject: @escaping RejectHandler, _ configure: TaskConfiguration) -> Void
     
     internal typealias _Machine = _StateMachine<Progress, Value, Error>
@@ -107,7 +107,7 @@ open class Task<Progress, Value, Error>: Cancellable, CustomStringConvertible
         case .Rejected, .Cancelled:
             valueString = "errorInfo=\(self.errorInfo!)"
         default:
-            valueString = "progress=\(self.progress)"
+            valueString = "progress=\(String(describing: self.progress))"
         }
         
         return "<\(self.name); state=\(self.state.rawValue); \(valueString!))>"
@@ -182,14 +182,6 @@ open class Task<Progress, Value, Error>: Cancellable, CustomStringConvertible
     {
         self.init(initClosure: { progress, fulfill, reject, configure in
             reject(error)
-        })
-        self.name = "RejectedTask"
-    }
-    
-    private convenience init(_errorInfo: ErrorInfo)
-    {
-        self.init(_initClosure: { _, progress, fulfill, _reject, configure in
-            _reject(_errorInfo)
         })
         self.name = "RejectedTask"
     }
@@ -320,22 +312,16 @@ open class Task<Progress, Value, Error>: Cancellable, CustomStringConvertible
     }
     
     /// Returns new task that is retryable for `maxRetryCount (= maxTryCount-1)` times.
-    /// - Parameter condition: Predicate that will be evaluated on each retry timing.
-    public func retry(_ maxRetryCount: Int, condition: @escaping ((ErrorInfo) -> Bool) = { _ in true }) -> Task
+    public func retry(_ maxRetryCount: Int) -> Task
     {
-        guard maxRetryCount > 0 else { return self }
+        if maxRetryCount < 1 { return self }
         
         return Task { machine, progress, fulfill, _reject, configure in
             
             let task = self.progress { _, progressValue in
                 progress(progressValue)
-                }.failure { [unowned self] errorInfo -> Task in
-                    if condition(errorInfo) {
-                        return self.clone().retry(maxRetryCount-1, condition: condition) // clone & try recursively
-                    }
-                    else {
-                        return Task(_errorInfo: errorInfo)
-                    }
+                }.failure { [unowned self] _ -> Task in
+                    return self.clone().retry(maxRetryCount-1) // clone & try recursively
             }
             
             task.progress { _, progressValue in
@@ -370,20 +356,19 @@ open class Task<Progress, Value, Error>: Cancellable, CustomStringConvertible
     /// - Note: `oldProgress` is always nil when `weakified = true`
     /// - Returns: Self (same `Task`)
     ///
-    @discardableResult public func progress(_ progressClosure: @escaping (ProgressTuple) -> Void) -> Self
+    @discardableResult public func progress(progressClosure: @escaping (ProgressTuple) -> Void) -> Self
     {
         var dummyCanceller: Canceller? = nil
         return self.progress(&dummyCanceller, progressClosure)
     }
     
-    @discardableResult public func progress<C: Canceller>(_ canceller: inout C?, _ progressClosure: @escaping (ProgressTuple) -> Void) -> Self
+    public func progress<C: Canceller>(_ canceller: inout C?, _ progressClosure: @escaping (ProgressTuple) -> Void) -> Self
     {
         var token: _HandlerToken? = nil
         self._machine.addProgressTupleHandler(&token, progressClosure)
-        weak var machine = _machine
         
-        canceller = C {
-            machine?.removeProgressTupleHandler(token)
+        canceller = C { [weak self] in
+            self?._machine.removeProgressTupleHandler(token)
         }
         
         return self
@@ -397,13 +382,13 @@ open class Task<Progress, Value, Error>: Cancellable, CustomStringConvertible
     ///
     /// - Returns: New `Task`
     ///
-    @discardableResult public func then<Value2>(_ thenClosure: @escaping (Value?, ErrorInfo?) -> Value2) -> Task<Progress, Value2, Error>
+    @discardableResult public func then<Value2>(thenClosure: @escaping (Value?, ErrorInfo?) -> Value2) -> Task<Progress, Value2, Error>
     {
         var dummyCanceller: Canceller? = nil
         return self.then(&dummyCanceller, thenClosure)
     }
     
-    @discardableResult public func then<Value2, C: Canceller>(_ canceller: inout C?, _ thenClosure: @escaping (Value?, ErrorInfo?) -> Value2) -> Task<Progress, Value2, Error>
+    public func then<Value2, C: Canceller>(_ canceller: inout C?, _ thenClosure: @escaping (Value?, ErrorInfo?) -> Value2) -> Task<Progress, Value2, Error>
     {
         return self.then(&canceller) { (value, errorInfo) -> Task<Progress, Value2, Error> in
             return Task<Progress, Value2, Error>(value: thenClosure(value, errorInfo))
@@ -418,7 +403,7 @@ open class Task<Progress, Value, Error>: Cancellable, CustomStringConvertible
     ///
     /// - Returns: New `Task`
     ///
-    @discardableResult public func then<Progress2, Value2, Error2>(_ thenClosure: @escaping (Value?, ErrorInfo?) -> Task<Progress2, Value2, Error2>) -> Task<Progress2, Value2, Error2>
+    public func then<Progress2, Value2, Error2>(thenClosure: @escaping (Value?, ErrorInfo?) -> Task<Progress2, Value2, Error2>) -> Task<Progress2, Value2, Error2>
     {
         var dummyCanceller: Canceller? = nil
         return self.then(&dummyCanceller, thenClosure)
@@ -432,7 +417,7 @@ open class Task<Progress, Value, Error>: Cancellable, CustomStringConvertible
     //
     /// - Returns: New `Task`
     ///
-    @discardableResult public func then<Progress2, Value2, Error2, C: Canceller>(_ canceller: inout C?, _ thenClosure: @escaping (Value?, ErrorInfo?) -> Task<Progress2, Value2, Error2>) -> Task<Progress2, Value2, Error2>
+    public func then<Progress2, Value2, Error2, C: Canceller>(_ canceller: inout C?, _ thenClosure: @escaping (Value?, ErrorInfo?) -> Task<Progress2, Value2, Error2>) -> Task<Progress2, Value2, Error2>
     {
         return Task<Progress2, Value2, Error2> { [unowned self, weak canceller] newMachine, progress, fulfill, _reject, configure in
             
@@ -477,13 +462,13 @@ open class Task<Progress, Value, Error>: Cancellable, CustomStringConvertible
     ///
     /// - Returns: New `Task`
     ///
-    @discardableResult public func success<Value2>(_ successClosure: @escaping (Value) -> Value2) -> Task<Progress, Value2, Error>
+    @discardableResult public func success<Value2>(successClosure: @escaping (Value) -> Value2) -> Task<Progress, Value2, Error>
     {
         var dummyCanceller: Canceller? = nil
         return self.success(&dummyCanceller, successClosure)
     }
     
-    @discardableResult public func success<Value2, C: Canceller>(_ canceller: inout C?, _ successClosure: @escaping (Value) -> Value2) -> Task<Progress, Value2, Error>
+    public func success<Value2, C: Canceller>(_ canceller: inout C?, _ successClosure: @escaping (Value) -> Value2) -> Task<Progress, Value2, Error>
     {
         return self.success(&canceller) { (value: Value) -> Task<Progress, Value2, Error> in
             return Task<Progress, Value2, Error>(value: successClosure(value))
@@ -498,13 +483,13 @@ open class Task<Progress, Value, Error>: Cancellable, CustomStringConvertible
     ///
     /// - Returns: New `Task`
     ///
-    @discardableResult public func success<Progress2, Value2, Error2>(_ successClosure: @escaping (Value) -> Task<Progress2, Value2, Error2>) -> Task<Progress2, Value2, Error>
+    public func success<Progress2, Value2, Error2>(successClosure: @escaping (Value) -> Task<Progress2, Value2, Error2>) -> Task<Progress2, Value2, Error>
     {
         var dummyCanceller: Canceller? = nil
         return self.success(&dummyCanceller, successClosure)
     }
     
-    @discardableResult public func success<Progress2, Value2, Error2, C: Canceller>(_ canceller: inout C?, _ successClosure: @escaping (Value) -> Task<Progress2, Value2, Error2>) -> Task<Progress2, Value2, Error>
+    public func success<Progress2, Value2, Error2, C: Canceller>(_ canceller: inout C?, _ successClosure: @escaping (Value) -> Task<Progress2, Value2, Error2>) -> Task<Progress2, Value2, Error>
     {
         var localCanceller = canceller; defer { canceller = localCanceller }
         return Task<Progress2, Value2, Error> { [unowned self] newMachine, progress, fulfill, _reject, configure in
@@ -556,13 +541,13 @@ open class Task<Progress, Value, Error>: Cancellable, CustomStringConvertible
     ///
     /// - Returns: New `Task`
     ///
-    @discardableResult public func failure<Progress2, Error2>(_ failureClosure: @escaping (ErrorInfo) -> Task<Progress2, Value, Error2>) -> Task<Progress2, Value, Error2>
+    public func failure<Progress2, Error2>(failureClosure: @escaping (ErrorInfo) -> Task<Progress2, Value, Error2>) -> Task<Progress2, Value, Error2>
     {
         var dummyCanceller: Canceller? = nil
         return self.failure(&dummyCanceller, failureClosure)
     }
     
-    @discardableResult public func failure<Progress2, Error2, C: Canceller>(_ canceller: inout C?, _ failureClosure: @escaping (ErrorInfo) -> Task<Progress2, Value, Error2>) -> Task<Progress2, Value, Error2>
+    public func failure<Progress2, Error2, C: Canceller>(_ canceller: inout C?, _ failureClosure: @escaping (ErrorInfo) -> Task<Progress2, Value, Error2>) -> Task<Progress2, Value, Error2>
     {
         var localCanceller = canceller; defer { canceller = localCanceller }
         return Task<Progress2, Value, Error2> { [unowned self] newMachine, progress, fulfill, _reject, configure in
@@ -860,3 +845,4 @@ extension Task
         }
     }
 }
+
